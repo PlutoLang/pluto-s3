@@ -1,5 +1,7 @@
 local crypto = require "pluto:crypto"
 
+local pluto_0_12_0_or_above <const> = !!crypto.hmac
+
 if not crypto.hmac then
     function crypto.hmac(algo, key, data, binary)
         local block_bytes = switch algo do
@@ -114,15 +116,17 @@ export class S3
         self.user = user
         self.pass = pass
         self.host = host
-        --[[if scheme == "http" then
-            if port ~= 80 then
-                self.host ..= ":"..port
+        if pluto_0_12_0_or_above then
+            if scheme == "http" then
+                if port ~= 80 then
+                    self.host ..= ":"..port
+                end
+            elseif scheme == "https" then
+                if port ~= 443 then
+                    self.host ..= ":"..port
+                end
             end
-        elseif scheme == "https" then
-            if port ~= 443 then
-                self.host ..= ":"..port
-            end
-        end]]
+        end
         self.base = scheme.."://"..host
         if port then
             self.base ..= ":"..port
@@ -147,7 +151,6 @@ export class S3
 
         headers.host = self.host
         headers.authorization = aws4_auth(self.user, self.pass, method, path, headers, self.region)
-        headers.host = nil
 
         local body, status_code = http.request(self.base .. path, opts)
         if not body then
