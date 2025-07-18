@@ -47,6 +47,7 @@ export function aws4_sign(user, pass, method, encoded_path, signed_headers, regi
     canonical_request ..= (query or ""):split("&"):sort():concat("&").."\n" -- Note: Assuming that all query parameters have an =
     local signed_headers_order = signed_headers:keys():sort()
     for signed_headers_order as key do
+        assert(key:lower() == key, "signed_headers keys must be lowercase")
         canonical_request ..= key..":"..signed_headers[key].."\n"
     end
     canonical_request ..= "\n"
