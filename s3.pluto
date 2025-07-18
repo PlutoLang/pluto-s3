@@ -106,7 +106,7 @@ local function parse_iso8601(str)
 end
 
 export class S3
-    function __construct(url)
+    function __construct(url, public region = "us-east-1")
         if url[#url] == "/" then
             url = url:sub(1, -2)
         end
@@ -146,7 +146,7 @@ export class S3
         end
 
         headers.host = self.host
-        headers.authorization = aws4_auth(self.user, self.pass, method, path, headers)
+        headers.authorization = aws4_auth(self.user, self.pass, method, path, headers, self.region)
         headers.host = nil
 
         local body, status_code = http.request(self.base .. path, opts)
