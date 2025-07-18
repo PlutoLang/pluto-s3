@@ -8,9 +8,10 @@ function aws4_sign(user, pass, method, encoded_path, signed_headers, region = "u
 function aws4_auth(user, pass, method, encoded_path, signed_headers, region = "us-east-1", service = "s3")
 
 class S3
+    function __construct(url)
     function request(method, path, content, headers = {})
     function ListBuckets()
-	
+
 class S3Bucket extends S3
     function ListObjects()
     function PutObject(name, mime_type, content)
