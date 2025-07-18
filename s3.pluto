@@ -1,0 +1,192 @@
+local crypto = require "pluto:crypto"
+
+if not crypto.hmac then
+    function crypto.hmac(algo, key, data, binary)
+        local block_bytes = switch algo do
+            case "sha1", "sha256" -> 64
+            case "sha384", "sha512" -> 128
+        end
+
+        local header
+        if #key == block_bytes then
+            header = key
+        elseif #key > block_bytes then
+            header = crypto[algo](key, true)
+        else
+            header = key .. string.rep("\0", block_bytes - #key)
+        end
+
+        local inner = header:split(""):map(|x| -> string.char(string.byte(x) ~ 0x36)):concat("")
+        local outer = header:split(""):map(|x| -> string.char(string.byte(x) ~ 0x5c)):concat("")
+
+        inner ..= data
+
+        inner = crypto[algo](inner, true)
+        outer ..= inner
+        outer = crypto[algo](outer, binary)
+        return outer
+    end
+end
+do
+    local key = "\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b"
+    assert(crypto.hmac("sha256", key, "Hi There") == "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")
+    assert(crypto.hmac("sha256", key, "Hi There", false) == "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")
+    assert(crypto.hmac("sha256", key, "Hi There", true) == "\xb0\x34\x4c\x61\xd8\xdb\x38\x53\x5c\xa8\xaf\xce\xaf\x0b\xf1\x2b\x88\x1d\xc2\x00\xc9\x83\x3d\xa7\x26\xe9\x37\x6c\x2e\x32\xcf\xf7")
+end
+
+export function aws4_date()
+    return os.date("!%Y%m%dT%H%M%SZ")
+end
+
+export function aws4_sign(user, pass, method, encoded_path, signed_headers, region = "us-east-1", service = "s3")
+    local canonical_request = method.."\n"
+    local [path, query] = encoded_path:split("?")
+    canonical_request ..= path.."\n"
+    canonical_request ..= (query or ""):split("&"):sort():concat("&").."\n" -- Note: Assuming that all query parameters have an =
+    local signed_headers_order = signed_headers:keys():sort()
+    for signed_headers_order as key do
+        canonical_request ..= key..":"..signed_headers[key].."\n"
+    end
+    canonical_request ..= "\n"
+    canonical_request ..= signed_headers_order:concat(";").."\n"
+    canonical_request ..= (signed_headers["x-amz-content-sha256"] ?? "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+
+    local date = signed_headers["x-amz-date"]:sub(1, 8)
+    local scope = date.."/"..region.."/"..service.."/aws4_request"
+    local datekey = crypto.hmac("sha256", "AWS4"..pass, date, true)
+    local dateregionkey = crypto.hmac("sha256", datekey, region, true)
+    local dateregionservicekey = crypto.hmac("sha256", dateregionkey, service, true)
+    local signkey = crypto.hmac("sha256", dateregionservicekey, "aws4_request", true)
+
+    local tosign = "AWS4-HMAC-SHA256\n"
+    tosign ..= signed_headers["x-amz-date"].."\n"
+    tosign ..= scope.."\n"
+    tosign ..= crypto.sha256(canonical_request, false)
+
+    return {
+        Credential = user.."/"..scope,
+        SignedHeaders = signed_headers_order:concat(";"),
+        Signature = crypto.hmac("sha256", signkey, tosign, false),
+    }
+end
+
+export function aws4_auth(...)
+    local { Credential, SignedHeaders, Signature } = aws4_sign(...)
+    return "AWS4-HMAC-SHA256 Credential="..Credential
+        ..",SignedHeaders="..SignedHeaders
+        ..",Signature="..Signature
+end
+
+--AWS4-HMAC-SHA256 Credential=minioadmin/20250718/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=63653b0f8fcca706dca2cda4ff9440cc2b5d1ed18d57d7c914da6dc9bf87e18e
+assert(aws4_sign("minioadmin", "minioadmin", "GET", "/", {
+    ["host"] = "localhost:9000",
+    ["x-amz-date"] = "20250718T090021Z",
+    ["x-amz-content-sha256"] = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+}).Signature == "63653b0f8fcca706dca2cda4ff9440cc2b5d1ed18d57d7c914da6dc9bf87e18e")
+
+local http = require "pluto:http"
+local xml = require "pluto:xml"
+
+local function parse_iso8601(str)
+    local year, month, day, hour, min, sec = str:match("(%d+)%-(%d+)%-(%d+)T(%d+):(%d+):(%d+)")
+    
+    local timestamp = os.time({
+        year = tonumber(year),
+        month = tonumber(month),
+        day = tonumber(day),
+        hour = tonumber(hour),
+        min = tonumber(min),
+        sec = tonumber(sec),
+        isdst = false
+    })
+
+    -- Adjust for UTC (os.time assumes local time)
+    local local_offset = os.difftime(os.time(os.date("!*t", timestamp)), timestamp)
+    return timestamp + local_offset
+end
+
+export class S3
+    function __construct(url)
+        if url[#url] == "/" then
+            url = url:sub(1, -2)
+        end
+        local { scheme, user, pass, host, port, path } = require"pluto:url".parse(url)
+        self.user = user
+        self.pass = pass
+        self.host = host
+        --[[if scheme == "http" then
+            if port ~= 80 then
+                self.host ..= ":"..port
+            end
+        elseif scheme == "https" then
+            if port ~= 443 then
+                self.host ..= ":"..port
+            end
+        end]]
+        self.base = scheme.."://"..host
+        if port then
+            self.base ..= ":"..port
+        end
+        self.base_path = path
+    end
+
+    function request(method, path, content, headers = {})
+        path = self.base_path .. path
+
+        local opts = {
+            method = method,
+            headers = headers,
+        }
+
+        headers["x-amz-date"] = aws4_date()
+
+        if content then
+            headers["x-amz-content-sha256"] = crypto.sha256(content)
+            opts.body = content
+        end
+
+        headers.host = self.host
+        headers.authorization = aws4_auth(self.user, self.pass, method, path, headers)
+        headers.host = nil
+
+        local body, status_code = http.request(self.base .. path, opts)
+        if not body then
+            error(tostring(status_code))
+        end
+        if (status_code // 100) ~= 2 then
+            error(status_code.." "..tostring(body))
+        end
+        return body
+    end
+
+    function ListBuckets()
+        return (self:request("GET", "/") |> xml.decode).Buckets.children:map(|x| -> {
+            Name = x.Name.children[1],
+            CreationDate = parse_iso8601(x.CreationDate.children[1]),
+        })
+    end
+end
+
+export class S3Bucket extends S3
+    function ListObjects()
+        return (self:request("GET", "/") |> xml.decode).children:filter(|x| -> x.tag == "Contents"):map(|x| -> {
+            Key = x.Key.children[1],
+            LastModified = parse_iso8601(x.LastModified.children[1]),
+            Size = tonumber(x.Size.children[1]),
+        })
+    end
+
+    function PutObject(name, mime_type, content)
+        self:request("PUT", "/"..name, content, {
+            ["content-type"] = mime_type,
+        })
+    end
+
+    function GetObject(name)
+        return self:request("GET", "/"..name)
+    end
+
+    function DeleteObject(name)
+        self:request("DELETE", "/"..name)
+    end
+end
