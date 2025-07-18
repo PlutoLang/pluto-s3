@@ -44,7 +44,13 @@ export function aws4_sign(user, pass, method, encoded_path, signed_headers, regi
     local canonical_request = method.."\n"
     local [path, query] = encoded_path:split("?")
     canonical_request ..= path.."\n"
-    canonical_request ..= (query or ""):split("&"):sort():concat("&").."\n" -- Note: Assuming that all query parameters have an =
+    if query and query ~= "" then
+        canonical_request ..= query:split("&"):sort():map(|e| -> do
+            local [k, v] = e:split("=", 2)
+            return k.."="..(v or "")
+        end):concat("&")
+    end
+    canonical_request ..= "\n"
     local signed_headers_order = signed_headers:keys():sort()
     for signed_headers_order as key do
         assert(key:lower() == key, "signed_headers keys must be lowercase")
